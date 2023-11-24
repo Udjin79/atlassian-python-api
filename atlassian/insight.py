@@ -527,7 +527,9 @@ class Insight(AtlassianRestAPI):
         """
         Find all object type attributes for this object schema
         """
-        raise NotImplementedError
+        url = self.url_joiner(self.api_root, "objectschema/{id}/attributes".format(id=schema_id))
+        return self.get(url)
+
 
     def get_object_schema_object_types_flat(self, schema_id, query=None, exclude=None, includeObjectCounts=None):
         """
@@ -616,8 +618,6 @@ class Insight(AtlassianRestAPI):
                               that the progress should be fetched for
         :return:
         """
-        if self.cloud:
-            raise NotImplementedError
         url = self.url_joiner(self.api_root, "progress/category/imports/{id}".format(id=import_id))
         return self.get(url)
 
