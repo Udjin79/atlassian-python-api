@@ -1,6 +1,7 @@
 # coding=utf-8
 import logging
 import re
+import os
 from warnings import warn
 from deprecated import deprecated
 from requests import HTTPError
@@ -163,6 +164,18 @@ class Jira(AtlassianRestAPI):
     Reference: https://docs.atlassian.com/software/jira/docs/api/REST/8.5.0/#api/2/attachment
     """
 
+    def get_attachments_ids_from_issue(self, issue):
+        """
+        Get attachments IDs from jira issue
+        :param jira issue key: str
+        :return: list of integers attachment IDs
+        """
+        issue_id = self.get_issue(issue)["fields"]["attachment"]
+        list_attachments_id = []
+        for attachment in issue_id:
+            list_attachments_id.append({"filename": attachment["filename"], "attachment_id": attachment["id"]})
+        return list_attachments_id
+
     def get_attachment(self, attachment_id):
         """
         Returns the meta-data for an attachment, including the URI of the actual attached file
@@ -172,6 +185,44 @@ class Jira(AtlassianRestAPI):
         base_url = self.resource_url("attachment")
         url = "{base_url}/{attachment_id}".format(base_url=base_url, attachment_id=attachment_id)
         return self.get(url)
+
+    def download_attachments_from_issue(self, issue, path=None, cloud=True):
+        """
+        Downloads all attachments from a Jira issue.
+        :param issue: The issue-key of the Jira issue
+        :param path: Path to directory where attachments will be saved. If None, current working directory will be used.
+        :param cloud: Use True for Jira Cloud, false when using Jira Data Center or Server
+        :return: A message indicating the result of the download operation.
+        """
+        try:
+            if path is None:
+                path = os.getcwd()
+            issue_id = self.issue(issue, fields="id")["id"]
+            if cloud:
+                url = self.url + f"/secure/issueAttachments/{issue_id}.zip"
+            else:
+                url = self.url + f"/secure/attachmentzip/{issue_id}.zip"
+            response = self._session.get(url)
+            attachment_name = f"{issue_id}_attachments.zip"
+            file_path = os.path.join(path, attachment_name)
+            # if Jira issue doesn't have any attachments _session.get request response will return 22 bytes of PKzip format
+            file_size = sum(len(chunk) for chunk in response.iter_content(8196))
+            if file_size == 22:
+                return "No attachments found on the Jira issue"
+            if os.path.isfile(file_path):
+                return "File already exists"
+            with open(file_path, "wb") as f:
+                f.write(response.content)
+            return "Attachments downloaded successfully"
+
+        except FileNotFoundError:
+            raise FileNotFoundError("Verify if directory path is correct and/or if directory exists")
+        except PermissionError:
+            raise PermissionError(
+                "Directory found, but there is a problem with saving file to this directory. Check directory permissions"
+            )
+        except Exception as e:
+            raise e
 
     def get_attachment_content(self, attachment_id):
         """
@@ -496,6 +547,11 @@ class Jira(AtlassianRestAPI):
         base_url = self.resource_url("component")
         url = "{base_url}/".format(base_url=base_url)
         return self.post(url, data=component)
+
+    def update_component(self, component, component_id):
+        base_url = self.resource_url("component")
+        url = "{base_url}/{component_id}".format(base_url=base_url, component_id=component_id)
+        return self.put(url, data=component)
 
     def delete_component(self, component_id):
         log.warning('Deleting component "%s"', component_id)
@@ -1064,13 +1120,43 @@ class Jira(AtlassianRestAPI):
         url = self.resource_url("issue/createmeta?projectKeys={}".format(project))
         return self.get(url, params=params)
 
-    def issue_createmeta_issuetypes(self, project):
+    def issue_createmeta_issuetypes(self, project, start=None, limit=None):
+        """
+        Get create metadata issue types for a project
+        Returns a page of issue type metadata for a specified project.
+        Use the information to populate the requests in Create issue and Create issues.
+        :param project:
+        :param start: default: 0
+        :param limit: default: 50
+        :return:
+        """
         url = self.resource_url("issue/createmeta/{}/issuetypes".format(project))
-        return self.get(url)
+        params = {}
+        if start:
+            params["startAt"] = start
+        if limit:
+            params["maxResults"] = limit
+        return self.get(url, params=params)
 
-    def issue_createmeta_fieldtypes(self, project, issue_type_id):
+    def issue_createmeta_fieldtypes(self, project, issue_type_id, start=None, limit=None):
+        """
+        Get create field metadata for a project and issue type id
+        Returns a page of field metadata for a specified project and issuetype id.
+        Use the information to populate the requests in Create issue and Create issues.
+        This operation can be accessed anonymously.
+        :param project:
+        :param issue_type_id:
+        :param start: default: 0
+        :param limit: default: 50
+        :return:
+        """
         url = self.resource_url("issue/createmeta/{}/issuetypes/{}".format(project, issue_type_id))
-        return self.get(url)
+        params = {}
+        if start:
+            params["startAt"] = start
+        if limit:
+            params["maxResults"] = limit
+        return self.get(url, params=params)
 
     def issue_editmeta(self, key):
         base_url = self.resource_url("issue")
@@ -1130,15 +1216,20 @@ class Jira(AtlassianRestAPI):
 
         return self.get(url)
 
-    def issue_archive(self, issue_id_or_key):
+    def issue_archive(self, issue_id_or_key, notify_users=None):
         """
         Archives an issue.
         :param issue_id_or_key: Issue id or issue key
+        :param notify_users: shall users be notified by Jira about archival?
+                             The default value of None will apply the default behavior of Jira
         :return:
         """
+        params = {}
+        if notify_users is not None:
+            params["notifyUsers"] = notify_users
         base_url = self.resource_url("issue")
         url = "{base_url}/{issueIdOrKey}/archive".format(base_url=base_url, issueIdOrKey=issue_id_or_key)
-        return self.put(url)
+        return self.put(url, params=params)
 
     def issue_restore(self, issue_id_or_key):
         """
@@ -1160,11 +1251,22 @@ class Jira(AtlassianRestAPI):
         issue = self.get("{base_url}/{key}".format(base_url=base_url, key=key))
         return issue["fields"]
 
-    def update_issue_field(self, key, fields="*all"):
+    def update_issue_field(self, key, fields="*all", notify_users=True):
+        """
+        Update an issue's fields.
+        :param key: str Issue id or issye key
+        :param fields: dict with target fields as keys and new contents as values
+        :param notify_users: bool OPTIONAL if True, use project's default notification scheme to notify users via email.
+                                           if False, do not send any email notifications. (only works with admin privilege)
+
+        Reference: https://developer.atlassian.com/cloud/jira/platform/rest/v2/api-group-issues/#api-rest-api-2-issue-issueidorkey-put
+        """
         base_url = self.resource_url("issue")
+        params = {"notifyUsers": "true" if notify_users else "false"}
         return self.put(
             "{base_url}/{key}".format(base_url=base_url, key=key),
             data={"fields": fields},
+            params=params,
         )
 
     def bulk_update_issue_field(self, key_list, fields="*all"):
@@ -1363,7 +1465,7 @@ class Jira(AtlassianRestAPI):
 
     def assign_issue(self, issue, account_id=None):
         """Assign an issue to a user. None will set it to unassigned. -1 will set it to Automatic.
-        :param issue: the issue ID or key to assign
+        :param issue : the issue ID or key to assign
         :type issue: int or str
         :param account_id: the account ID of the user to assign the issue to;
                 for jira server the value for account_id should be a valid jira username
@@ -1465,13 +1567,14 @@ class Jira(AtlassianRestAPI):
             data["visibility"] = visibility
         return self.post(url, data=data)
 
-    def issue_edit_comment(self, issue_key, comment_id, comment, visibility=None):
+    def issue_edit_comment(self, issue_key, comment_id, comment, visibility=None, notify_users=True):
         """
         Updates an existing comment
         :param issue_key: str
         :param comment_id: int
         :param comment: str
         :param visibility: OPTIONAL
+        :param notify_users: bool OPTIONAL
         :return:
         """
         base_url = self.resource_url("issue")
@@ -1481,7 +1584,47 @@ class Jira(AtlassianRestAPI):
         data = {"body": comment}
         if visibility:
             data["visibility"] = visibility
-        return self.put(url, data=data)
+        params = {"notifyUsers": "true" if notify_users else "false"}
+        return self.put(url, data=data, params=params)
+
+    def scrap_regex_from_issue(self, issue, regex):
+        """
+        This function scrapes the output of the given regex matches from the issue's description and comments.
+
+        Parameters:
+        issue (str): jira issue ide.
+        regex (str): The regex to match.
+
+        Returns:
+        list: A list of matches.
+        """
+        regex_output = []
+        issue_output = self.get_issue(issue)
+        description = issue_output["fields"]["description"]
+        comments = issue_output["fields"]["comment"]["comments"]
+
+        try:
+            if description is not None:
+                description_matches = [x.group(0) for x in re.finditer(regex, description)]
+                if description_matches:
+                    regex_output.extend(description_matches)
+
+                for comment in comments:
+                    comment_html = comment["body"]
+                    comment_matches = [x.group(0) for x in re.finditer(regex, comment_html)]
+                    if comment_matches:
+                        regex_output.extend(comment_matches)
+
+            return regex_output
+        except HTTPError as e:
+            if e.response.status_code == 404:
+                # Raise ApiError as the documented reason is ambiguous
+                log.error("couldn't find issue: ", issue["key"])
+                raise ApiNotFoundError(
+                    "There is no content with the given issue ud,"
+                    "or the calling user does not have permission to view the issue",
+                    reason=e,
+                )
 
     def get_issue_remotelinks(self, issue_key, global_id=None, internal_id=None):
         """
@@ -1673,6 +1816,38 @@ class Jira(AtlassianRestAPI):
             params["expand"] = expand
         return self.get(url, params=params)
 
+    def get_issue_property_keys(self, issue_key):
+        """
+        Get Property Keys on an Issue.
+        :param issue_key: Issue KEY
+        :raises: requests.exceptions.HTTPError
+        :return:
+        """
+        base_url = self.resource_url("issue")
+        url = "{base_url}/{issue_key}/properties".format(base_url=base_url, issue_key=issue_key)
+        return self.get(url)
+
+    def set_issue_property(self, issue_key, property_key, data):
+        base_url = self.resource_url("issue")
+        url = "{base_url}/{issue_key}/properties/{propertyKey}".format(
+            base_url=base_url, issue_key=issue_key, propertyKey=property_key
+        )
+        return self.put(url, data=data)
+
+    def get_issue_property(self, issue_key, property_key):
+        base_url = self.resource_url("issue")
+        url = "{base_url}/{issue_key}/properties/{propertyKey}".format(
+            base_url=base_url, issue_key=issue_key, propertyKey=property_key
+        )
+        return self.get(url)
+
+    def delete_issue_property(self, issue_key, property_key):
+        base_url = self.resource_url("issue")
+        url = "{base_url}/{issue_key}/properties/{propertyKey}".format(
+            base_url=base_url, issue_key=issue_key, propertyKey=property_key
+        )
+        return self.delete(url)
+
     def get_updated_worklogs(self, since, expand=None):
         """
         Returns a list of IDs and update timestamps for worklogs updated after a date and time.
@@ -1753,6 +1928,10 @@ class Jira(AtlassianRestAPI):
         return self.get(url, params=params)
 
     def myself(self):
+        """
+        Currently logged user resource
+        :return:
+        """
         url = self.resource_url("myself")
         return self.get(url)
 
@@ -2347,6 +2526,15 @@ class Jira(AtlassianRestAPI):
         url = "{base_url}/{key}/version".format(base_url=base_url, key=key)
         return self.get(url, params=params)
 
+    def get_version(self, version):
+        """
+        Returns a specific version with the given id.
+        :param version: The id of the version to return
+        """
+        base_url = self.resource_url("version")
+        url = "{base_url}/{version}".format(base_url=base_url, version=version)
+        return self.get(url)
+
     def add_version(
         self,
         project_key,
@@ -2421,6 +2609,28 @@ class Jira(AtlassianRestAPI):
         base_url = self.resource_url("version")
         url = "{base_url}/{version}".format(base_url=base_url, version=version)
         return self.put(url, data=payload)
+
+    def move_version(self, version, after=None, position=None):
+        """
+        Reposition a project version
+        :param version: The version id to move
+        :param after: The version id to move version below
+        :param position: A position to move the version to
+        """
+        base_url = self.resource_url("version")
+        url = "{base_url}/{version}/move".format(base_url=base_url, version=version)
+        if after is None and position is None:
+            raise ValueError("Must provide one of `after` or `position`")
+        if after:
+            after_url = self.get_version(after).get("self")
+            return self.post(url, data={"after": after_url})
+        if position:
+            position = position.lower().capitalize()
+            if position not in ["Earlier", "Later", "First", "Last"]:
+                raise ValueError(
+                    "position must be one of Earlier, Later, First, or Last. Got {pos}".format(pos=position)
+                )
+            return self.post(url, data={"position": position})
 
     def get_project_roles(self, project_key):
         """
@@ -4111,12 +4321,12 @@ api-group-workflows/#api-rest-api-2-workflow-search-get)
         return self.get(url, params=params)
 
     # noinspection PyIncorrectDocstring
-    def tempo_4_timesheets_find_worklogs(self, **params):
+    def tempo_4_timesheets_find_worklogs(self, date_from=None, date_to=None, **params):
         """
         Find existing worklogs with searching parameters.
         NOTE: check if you are using correct types for the parameters!
-        :param from: string From Date
-        :param to: string To Date
+        :param date_from: string From Date
+        :param date_to: string To Date
         :param worker: Array of strings
         :param taskId: Array of integers
         :param taskKey: Array of strings
@@ -4137,6 +4347,11 @@ api-group-workflows/#api-rest-api-2-workflow-search-get)
         :param maxResults: integer
         :param offset: integer
         """
+
+        if date_from:
+            params["from"] = date_from
+        if date_to:
+            params["to"] = date_to
 
         url = "rest/tempo-timesheets/4/worklogs/search"
         return self.post(url, data=params)

@@ -61,6 +61,9 @@ Manage users
 
 .. code-block:: python
 
+    # Get myself
+    jira.myself()
+
     # Get user
     jira.user(account_id)
 
@@ -219,7 +222,7 @@ Manage issues
 
     # Update issue field
     fields = {'summary': 'New summary'}
-    jira.update_issue_field(key, fields)
+    jira.update_issue_field(key, fields, notify_users=True)
 
     # Get existing custom fields or find by filter
     jira.get_custom_fields(self, search=None, start=1, limit=50):
@@ -269,6 +272,15 @@ Manage issues
     # Get Issue Edit Meta
     jira.issue_editmeta(issue_key)
 
+    # Get issue create meta, deprecated on Cloud and from Jira 9.0
+    jira.issue_createmeta(project, expand="projects.issuetypes.fields")
+
+    # Get create metadata issue types for a project
+    jira.issue_createmeta_issuetypes(project, start=None, limit=None)
+
+    # Get create field metadata for a project and issue type id
+    jira.issue_createmeta_fieldtypes(self, project, issue_type_id, start=None, limit=None)
+
     # Create Issue Link
     data = {
             "type": {"name": "Duplicate" },
@@ -316,6 +328,9 @@ Manage issues
     # Add Comments
     jira.issue_add_comment(issue_id_or_key, "This is a sample comment string.")
 
+    # Edit Comments
+    jira.issue_edit_comment(issue_key, comment_id, comment, visibility=None, notify_users=True)
+
     # Issue Comments
     jira.issue_get_comments(issue_id_or_key)
 
@@ -328,12 +343,28 @@ Manage issues
     # Get change history for an issue
     jira.get_issue_changelog(issue_key)
 
+    # Get property keys from an issue
+    jira.get_issue_property_keys(issue_key)
+
+    # Set issue property
+    data = { "Foo": "Bar" }
+    jira.set_issue_property(issue_key, property_key, data)
+
+    # Get issue property
+    jira.get_issue_property(issue_key, property_key)
+
+    # Delete issue property
+    jira.delete_issue_property(issue_key, property_key)
+
     # Get worklog for an issue
     jira.issue_get_worklog(issue_key)
 
     # Create a new worklog entry for an issue
     # started is a date string in the format %Y-%m-%dT%H:%M:%S.000+0000%z
     jira.issue_worklog(issue_key, started, time_in_sec)
+
+    # Scrap regex matches from issue description and comments:
+    jira.scrap_regex_from_issue(issue_key, regex)
 
 
 Epic Issues
@@ -458,6 +489,12 @@ Attachments actions
     # Add attachment (IO Object) to issue
     jira.add_attachment_object(issue_key, attachment)
 
+    # Download attachments from the issue
+    jira.download_attachments_from_issue(issue, path=None, cloud=True):
+
+    # Get list of attachments ids from issue
+    jira.get_attachments_ids_from_issue(issue_key)
+
 Manage components
 -----------------
 
@@ -468,6 +505,9 @@ Manage components
 
     # Create component
     jira.create_component(component)
+
+    # Update component
+    jira.update_component(component, component_id)
 
     # Delete component
     jira.delete_component(component_id)
@@ -539,8 +579,8 @@ TEMPO
     # Look at the tempo docs for additional information:
     # https://www.tempo.io/server-api-documentation/timesheets#operation/searchWorklogs
     # NOTE: check if you are using correct types for the parameters!
-    #     :param from: string From Date
-    #     :param to: string To Date
+    #     :param date_from: string From Date
+    #     :param date_to: string To Date
     #     :param worker: Array of strings
     #     :param taskId: Array of integers
     #     :param taskKey: Array of strings
@@ -560,7 +600,7 @@ TEMPO
     #     :param pageNo: integer
     #     :param maxResults: integer
     #     :param offset: integer
-    jira.tempo_4_timesheets_find_worklogs(**params)
+    jira.tempo_4_timesheets_find_worklogs(date_from=None, date_to=None, **params)
 
     # :PRIVATE:
     # Get Tempo timesheet worklog by issue key or id.

@@ -120,6 +120,9 @@ Page actions
     # automatically version the new file and keep the old one
     confluence.attach_content(content, name=None, content_type=None, page_id=None, title=None, space=None, comment=None)
 
+    # Download attachments from a page to local system. If download_path is None, current working directory will be used.
+    confluence.download_attachments_from_page(page_id, download_path=None)
+
     # Remove completely a file if version is None or delete version
     confluence.delete_attachment(page_id, filename, version=None)
 
@@ -152,6 +155,12 @@ Page actions
     # Add comment into page
     confluence.add_comment(page_id, text)
 
+     # Fetch tables from Confluence page
+    confluence.get_tables_from_page(page_id)
+
+    # Get regex matches from Confluence page
+    confluence.scrap_regex_from_page(page_id, regex)
+
 Template actions
 ----------------
 
@@ -179,19 +188,19 @@ Template actions
     confluence.create_or_update_template(name, body, template_type, description=description, labels=labels, space=space)
 
     # Get a template by its ID
-    confluence.get_template_by_id(template_id)
+    confluence.get_content_template(template_id)
 
     # Get all global content templates
-    confluence.get_all_templates_from_space()
+    confluence.get_content_templates()
 
     # Get content templates in a space
-    confluence.get_all_templates_from_space(space)
+    confluence.get_content_templates(space)
 
     # Get all global blueprint templates
-    confluence.get_all_blueprints_from_space()
+    confluence.get_blueprint_templates()
 
     # Get all blueprint templates in a space
-    confluence.get_all_blueprints_from_space(space)
+    confluence.get_blueprint_templates(space)
 
     # Removing a template
     confluence.remove_template(template_id)
