@@ -24,6 +24,62 @@ class Jira(AtlassianRestAPI):
 
         super(Jira, self).__init__(url, *args, **kwargs)
 
+    def _get_paged(
+        self,
+        url,
+        params=None,
+        data=None,
+        flags=None,
+        trailing=None,
+        absolute=False,
+    ):
+        """
+        Used to get the paged data
+
+        :param url: string:                        The url to retrieve
+        :param params: dict (default is None):     The parameter's
+        :param data: dict (default is None):       The data
+        :param flags: string[] (default is None):  The flags
+        :param trailing: bool (default is None):   If True, a trailing slash is added to the url
+        :param absolute: bool (default is False):  If True, the url is used absolute and not relative to the root
+
+        :return: A generator object for the data elements
+        """
+
+        if self.cloud:
+            if params is None:
+                params = {}
+
+            while True:
+                response = super(Jira, self).get(
+                    url,
+                    trailing=trailing,
+                    params=params,
+                    data=data,
+                    flags=flags,
+                    absolute=absolute,
+                )
+                values = response.get("values", [])
+                for value in values:
+                    yield value
+
+                if response.get("isLast", False) or len(values) == 0:
+                    break
+
+                url = response.get("nextPage")
+                if url is None:
+                    break
+                # From now on we have absolute URLs with parameters
+                absolute = True
+                # Params are now provided by the url
+                params = {}
+                # Trailing should not be added as it is already part of the url
+                trailing = False
+        else:
+            raise ValueError("``_get_paged`` method is only available for Jira Cloud platform")
+
+        return
+
     def get_permissions(
         self,
         permissions,
@@ -1026,13 +1082,7 @@ class Jira(AtlassianRestAPI):
             params["expand"] = expand
         return self.get(url, params=params)
 
-    def get_issue(
-        self,
-        issue_id_or_key,
-        fields=None,
-        properties=None,
-        update_history=True,
-    ):
+    def get_issue(self, issue_id_or_key, fields=None, properties=None, update_history=True, expand=None):
         """
         Returns a full representation of the issue for the given issue key
         By default, all fields are returned in this get-issue resource
@@ -1041,6 +1091,7 @@ class Jira(AtlassianRestAPI):
         :param fields: str
         :param properties: str
         :param update_history: bool
+        :param expand: str
         :return: issue
         """
         base_url = self.resource_url("issue")
@@ -1053,11 +1104,9 @@ class Jira(AtlassianRestAPI):
             params["fields"] = fields
         if properties is not None:
             params["properties"] = properties
-        if update_history is True:
-            params["updateHistory"] = "true"
-        if update_history is False:
-            params["updateHistory"] = "false"
-
+        if expand:
+            params["expand"] = expand
+        params["updateHistory"] = str(update_history).lower()
         return self.get(url, params=params)
 
     def epic_issues(self, epic, fields="*all", expand=None):
@@ -1172,13 +1221,18 @@ class Jira(AtlassianRestAPI):
         :return:
         """
         base_url = self.resource_url("issue")
-        url = "{base_url}/{issue_key}?expand=changelog".format(base_url=base_url, issue_key=issue_key)
         params = {}
         if start:
             params["startAt"] = start
         if limit:
             params["maxResults"] = limit
-        return (self.get(url) or {}).get("changelog", params)
+
+        if self.cloud:
+            url = "{base_url}/{issue_key}/changelog".format(base_url=base_url, issue_key=issue_key)
+            return self.get(url, params=params)
+        else:
+            url = "{base_url}/{issue_key}?expand=changelog".format(base_url=base_url, issue_key=issue_key)
+            return (self.get(url) or {}).get("changelog", params)
 
     def issue_add_json_worklog(self, key, worklog):
         """
@@ -1271,7 +1325,7 @@ class Jira(AtlassianRestAPI):
 
     def bulk_update_issue_field(self, key_list, fields="*all"):
         """
-        :param key_list=list of issues with common filed to be updated
+        :param key_list: list of issues with common filed to be updated
         :param fields: common fields to be updated
         return Boolean True/False
         """
@@ -1286,6 +1340,33 @@ class Jira(AtlassianRestAPI):
             log.error(e)
             return False
         return True
+
+    def issue_field_value_append(self, issue_id_or_key, field, value, notify_users=True):
+        """
+        Add value to a multiple value field
+
+        :param issue_id_or_key: str Issue id or issue key
+        :param field: str Field key ("customfield_10000")
+        :param value: str A value which need to append (use python value types)
+        :param notify_users: bool OPTIONAL if True, use project's default notification scheme to notify users via email.
+                                           if False, do not send any email notifications. (only works with admin privilege)
+        """
+        base_url = self.resource_url("issue")
+        params = {"notifyUsers": True if notify_users else False}
+        current_value = self.issue_field_value(key=issue_id_or_key, field=field)
+
+        if current_value:
+            new_value = current_value + [value]
+        else:
+            new_value = [value]
+
+        fields = {"{}".format(field): new_value}
+
+        return self.put(
+            "{base_url}/{key}".format(base_url=base_url, key=issue_id_or_key),
+            data={"fields": fields},
+            params=params,
+        )
 
     def get_issue_labels(self, issue_key):
         """
@@ -1649,6 +1730,42 @@ class Jira(AtlassianRestAPI):
             url += "/" + internal_id
         return self.get(url, params=params)
 
+    def get_issue_tree_recursive(self, issue_key, tree=[], depth=0):
+        """
+        Returns list that contains the  tree structure of the root issue, with all subtasks and inward linked issues.
+        (!) Function only returns child issues from the same jira instance or from instance to which api key has access to.
+        (!) User asssociated with API key must have access to the  all child issues in order to get them.
+        :param  jira issue_key:
+        :param tree: blank parameter used for recursion. Don't change it.
+        :param depth: blank parameter used for recursion. Don't change it.
+        :return: list of dictioanries, key is the parent issue key, value is the child/linked issue key
+
+        """
+
+        # Check the recursion depth. In case of any bugs that would result in infinite recursion, this will prevent the function from crashing your app. Python default for REcursionError  is 1000
+        if depth > 50:
+            raise Exception("Recursion depth exceeded")
+        issue = self.get_issue(issue_key)
+        issue_links = issue["fields"]["issuelinks"]
+        subtasks = issue["fields"]["subtasks"]
+        for issue_link in issue_links:
+            if issue_link.get("inwardIssue") is not None:
+                parent_issue_key = issue["key"]
+                if not [
+                    x for x in tree if issue_link["inwardIssue"]["key"] in x.keys()
+                ]:  # condition to avoid infinite recursion
+                    tree.append({parent_issue_key: issue_link["inwardIssue"]["key"]})
+                    self.get_issue_tree_recursive(
+                        issue_link["inwardIssue"]["key"], tree, depth + 1
+                    )  # recursive call of the function
+        for subtask in subtasks:
+            if subtask.get("key") is not None:
+                parent_issue_key = issue["key"]
+                if not [x for x in tree if subtask["key"] in x.keys()]:  # condition to avoid infinite recursion
+                    tree.append({parent_issue_key: subtask["key"]})
+                    self.get_issue_tree_recursive(subtask["key"], tree, depth + 1)  # recursive call of the function
+        return tree
+
     def create_or_update_issue_remote_links(
         self,
         issue_key,
@@ -1774,6 +1891,20 @@ class Jira(AtlassianRestAPI):
         if update is not None:
             data["update"] = update
         return self.post(url, data=data)
+
+    def get_issue_status_changelog(self, issue_id):
+        # Get the issue details with changelog
+        response_get_issue = self.get_issue(issue_id, expand="changelog")
+        status_change_history = []
+        for history in response_get_issue["changelog"]["histories"]:
+            for item in history["items"]:
+                # Check if the item is a status change
+                if item["field"] == "status":
+                    status_change_history.append(
+                        {"from": item["fromString"], "to": item["toString"], "date": history["created"]}
+                    )
+
+        return status_change_history
 
     def set_issue_status_by_transition_id(self, issue_key, transition_id):
         """
@@ -2297,83 +2428,23 @@ class Jira(AtlassianRestAPI):
         :param expand:
         :return:
         """
+
+        params = {}
+        if included_archived:
+            params["includeArchived"] = included_archived
+        if expand:
+            params["expand"] = expand
         if self.cloud:
-            return self.projects_from_cloud(
-                included_archived=included_archived,
-                expand=expand,
+            return list(
+                self._get_paged(
+                    self.resource_url("project/search"),
+                    params,
+                    paging_workaround=True,
+                )
             )
         else:
-            return self.projects_from_server(
-                included_archived=included_archived,
-                expand=expand,
-            )
-
-    def projects_from_cloud(self, included_archived=None, expand=None):
-        """
-        Returns all projects which are visible for the currently logged-in user.
-        Cloud version should use the ``paginated``endpoint to get pages of projects, as the old endpoint is deprecated.
-        If no user is logged in, it returns the list of projects that are visible when using anonymous access.
-        :param included_archived: boolean whether to include archived projects in response, default: false
-        :param expand:
-        :return:
-        """
-        if not self.cloud:
-            raise ValueError("``projects_from_cloud`` method is only available for Jira Cloud platform")
-
-        projects = self.paginated_projects(
-            included_archived=included_archived,
-            expand=expand,
-        )
-        while not projects.get("isLast"):
-            projects["values"].extend(
-                self.paginated_projects(
-                    included_archived=included_archived,
-                    expand=expand,
-                    url=projects["nextPage"],
-                )["values"]
-            )
-        return projects["values"]
-
-    def paginated_projects(self, included_archived=None, expand=None, url=None):
-        """
-        Returns a page of projects which are visible for the currently logged-in user.
-        Method to be used only for Jira Cloud platform, until tests on Jira Server are executed.
-        If no user is logged in, it returns the list of projects that are visible when using anonymous access.
-        :param included_archived: boolean whether to include archived projects in response, default: false
-        :param expand:
-        :param url: url to get the next page of projects, default: false (first page)
-        :return:
-        """
-        if not self.cloud:
-            raise ValueError("``projects_from_cloud`` method is only available for Jira Cloud platform")
-
-        params = {}
-        if included_archived:
-            params["includeArchived"] = included_archived
-        if expand:
-            params["expand"] = expand
-        page_url = url or self.resource_url("project/search")
-        is_url_absolute = bool(page_url.lower().startswith("http"))
-        return self.get(page_url, params=params, absolute=is_url_absolute)
-
-    def projects_from_server(self, included_archived=None, expand=None):
-        """
-        Returns all projects which are visible for the currently logged-in user.
-        If no user is logged in, it returns the list of projects that are visible when using anonymous access.
-        :param included_archived: boolean whether to include archived projects in response, default: false
-        :param expand:
-        :return:
-        """
-        if self.cloud:
-            raise ValueError("``projects_from_server`` method is only available for Jira Server platform")
-
-        params = {}
-        if included_archived:
-            params["includeArchived"] = included_archived
-        if expand:
-            params["expand"] = expand
-        url = self.resource_url("project")
-        return self.get(url, params=params)
+            url = self.resource_url("project")
+            return self.get(url, params=params)
 
     def create_project_from_raw_json(self, json):
         """
@@ -3598,6 +3669,34 @@ api-group-workflows/#api-rest-api-2-workflow-search-get)
         }
         url = "/plugins/1.0/{plugin_key}/license".format(plugin_key=plugin_key)
         data = {"rawLicense": raw_license}
+        return self.put(url, data=data, headers=app_headers)
+
+    def disable_plugin(self, plugin_key):
+        """
+        Disable a plugin
+        :param plugin_key:
+        :return:
+        """
+        app_headers = {
+            "X-Atlassian-Token": "nocheck",
+            "Content-Type": "application/vnd.atl.plugins+json",
+        }
+        url = "rest/plugins/1.0/{plugin_key}-key".format(plugin_key=plugin_key)
+        data = {"status": "disabled"}
+        return self.put(url, data=data, headers=app_headers)
+
+    def enable_plugin(self, plugin_key):
+        """
+        Enable a plugin
+        :param plugin_key:
+        :return:
+        """
+        app_headers = {
+            "X-Atlassian-Token": "nocheck",
+            "Content-Type": "application/vnd.atl.plugins+json",
+        }
+        url = "rest/plugins/1.0/{plugin_key}-key".format(plugin_key=plugin_key)
+        data = {"status": "enabled"}
         return self.put(url, data=data, headers=app_headers)
 
     def get_all_permissionschemes(self, expand=None):
@@ -5227,4 +5326,35 @@ api-group-workflows/#api-rest-api-2-workflow-search-get)
         if not response:
             # check as support tools
             response = self.get("rest/supportHealthCheck/1.0/check/")
+        return response
+
+    def duplicated_account_checks_detail(self):
+        """
+        Health check: Duplicate user accounts detail
+        https://confluence.atlassian.com/jirakb/health-check-duplicate-user-accounts-1063554355.html
+        :return:
+        """
+        response = self.get("rest/api/2/user/duplicated/list")
+        return response
+
+    def duplicated_account_checks_flush(self):
+        """
+        Health check: Duplicate user accounts by flush
+        The responses returned by the count and list methods are stored in the duplicate users cache for 10 minutes.
+        The cache is flushed automatically every time a directory
+        is added, deleted, enabled, disabled, reordered, or synchronized.
+        https://confluence.atlassian.com/jirakb/health-check-duplicate-user-accounts-1063554355.html
+        :return:
+        """
+        params = {"flush": "true"}
+        response = self.get("rest/api/2/user/duplicated/list", params=params)
+        return response
+
+    def duplicated_account_checks_count(self):
+        """
+        Health check: Duplicate user accounts count
+        https://confluence.atlassian.com/jirakb/health-check-duplicate-user-accounts-1063554355.html
+        :return:
+        """
+        response = self.get("rest/api/2/user/duplicated/count")
         return response
